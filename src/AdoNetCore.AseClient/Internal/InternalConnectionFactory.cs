@@ -180,8 +180,7 @@ namespace AdoNetCore.AseClient.Internal
 
         private bool UserCertificateValidationCallback(object sender, X509Certificate serverCertificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
         {
-            var certificateChainPolicyErrors = (sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) == SslPolicyErrors.RemoteCertificateChainErrors;
-            var otherPolicyErrors = (sslPolicyErrors & ~SslPolicyErrors.RemoteCertificateChainErrors) != SslPolicyErrors.None;
+            var otherPolicyErrors = (sslPolicyErrors & ~SslPolicyErrors.RemoteCertificateChainErrors) !=  SslPolicyErrors.None;
 
             // We're not concerned with chain errors as we verify the chain below.
             if (otherPolicyErrors)
@@ -189,29 +188,7 @@ namespace AdoNetCore.AseClient.Internal
                 Logger.Instance?.WriteLine($"{nameof(InternalConnectionFactory)}.{nameof(UserCertificateValidationCallback)} secure connection failed due to policy errors: {sslPolicyErrors}");
                 return false;
             }
-
-            var untrustedRootChainStatusFlags = false;
-            var otherChainStatusFlags = false;
-
-            // We're not concerned with UntrustedRoot errors as we verify that below.
-            foreach (var status in chain.ChainStatus)
-            {
-                untrustedRootChainStatusFlags |= (status.Status & X509ChainStatusFlags.UntrustedRoot) == X509ChainStatusFlags.UntrustedRoot;
-                otherChainStatusFlags |= (status.Status & ~X509ChainStatusFlags.UntrustedRoot) != X509ChainStatusFlags.NoError;
-
-                if (otherChainStatusFlags)
-                {
-                    Logger.Instance?.WriteLine($"{nameof(InternalConnectionFactory)}.{nameof(UserCertificateValidationCallback)} secure connection failed due to chain status: {status.Status}");
-                    return false;
-                }
-            }
-
-            if (!(certificateChainPolicyErrors || untrustedRootChainStatusFlags))
-            {
-                //No chain Errors, we will trust the server certificate.
-                return true;
-            }
-
+            
             // The TrustedFile is a file containing the public keys, in PEM format of the trusted
             // root certificates that this client is willing to accept TLS connections from.
             if (!string.IsNullOrWhiteSpace(_parameters.TrustedFile) && File.Exists(_parameters.TrustedFile))
@@ -221,26 +198,21 @@ namespace AdoNetCore.AseClient.Internal
                     var trustedRootCertificatesPem = File.ReadAllText(_parameters.TrustedFile, Encoding.ASCII);
 
                     var parser = new PemParser();
-                    var rootCertificates =
-                        parser.ParseCertificates(trustedRootCertificatesPem)
-                            .ToDictionary(GetCertificateKey);
+                    var rootCertificates = parser.ParseCertificates(trustedRootCertificatesPem);
 
-                    // If the server certificate itself is the root, weird, but ok.
-                    if (rootCertificates.ContainsKey(GetCertificateKey(serverCertificate)))
+                    var localChain = new X509Chain
                     {
-                        return true;
-                    }
-
-                    // If any certificates in the chain are trusted, then we will trust the server certificate.
-                    foreach (var chainElement in chain.ChainElements)
-                    {
-                        var key = GetCertificateKey(chainElement.Certificate);
-
-                        if (rootCertificates.ContainsKey(key))
+                        ChainPolicy =
                         {
-                            return true;
+                            RevocationMode = X509RevocationMode.NoCheck,
+                            VerificationFlags = X509VerificationFlags.IgnoreCertificateAuthorityRevocationUnknown |
+                                                X509VerificationFlags.IgnoreInvalidBasicConstraints
                         }
-                    }
+                    };
+
+                    localChain.ChainPolicy.ExtraStore.AddRange(rootCertificates.ToArray());
+
+                    return localChain.Build(new X509Certificate2(serverCertificate)); // .Build asserts the chain is valid, given the policy specified above
                 }
                 catch (CryptographicException e)
                 {
